@@ -70,7 +70,8 @@ final class AppModel: ObservableObject {
         settings = Settings.load()
         reload()
         timer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.autoPass() }
+            guard let model = self else { return }
+            Task { @MainActor in model.autoPass() }
         }
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 120 * 1_000_000_000)
@@ -209,8 +210,9 @@ final class AppModel: ObservableObject {
         activity[item.id] = .compressing(done: 0, total: item.stats?.uncompressedBytes ?? 0)
         let id = item.id, name = item.name, url = item.url, app = item.steamApp
         let report: @Sendable (Int64, Int64) -> Void = { [weak self] done, total in
+            guard let model = self else { return }
             Task { @MainActor in
-                if self?.isBusy(id) == true { self?.activity[id] = .compressing(done: done, total: total) }
+                if model.isBusy(id) { model.activity[id] = .compressing(done: done, total: total) }
             }
         }
         Task { [weak self] in

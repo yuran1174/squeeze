@@ -134,6 +134,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 0.x versions are marked as pre-releases
+          pre=(); [[ "$GITHUB_REF_NAME" == v0.* ]] && pre=(--prerelease)
           gh release create "$GITHUB_REF_NAME" dist/Squeeze-*.zip \
             --title "Squeeze ${GITHUB_REF_NAME#v}" \
-            --generate-notes
+            --generate-notes ${pre[@]+"${pre[@]}"}

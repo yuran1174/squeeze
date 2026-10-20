@@ -35,8 +35,14 @@ public enum Machine {
     }
 
     /// Something is running from inside the folder (a game is open).
+    /// `ps` prints the real path (`/private/var/...`), while the folder may be given through a symbolic link
+    /// (`/var/...`, a link to a library on another disk), so both spellings are compared.
     public static func isRunning(inside folder: URL, executables: [String]? = nil) -> Bool {
-        let prefix = folder.standardizedFileURL.path + "/"
-        return (executables ?? runningExecutables()).contains { $0.hasPrefix(prefix) }
+        var prefixes = Set([folder.standardizedFileURL.path + "/"])
+        if let real = realpath(folder.path, nil) {
+            prefixes.insert(String(cString: real) + "/")
+            free(real)
+        }
+        return (executables ?? runningExecutables()).contains { exe in prefixes.contains { exe.hasPrefix($0) } }
     }
 }

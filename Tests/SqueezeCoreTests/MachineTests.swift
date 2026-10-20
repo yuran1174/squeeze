@@ -37,7 +37,7 @@ final class MachineTests: XCTestCase {
             seen = Machine.isRunning(inside: dir)
             if !seen { Thread.sleep(forTimeInterval: 0.1) }
         }
-        XCTAssertTrue(seen, "ps -axo comm= should list \(exe.path)")
+        XCTAssertTrue(seen, "ps -axo comm= should list \(exe.path); matching lines: \(Machine.runningExecutables().filter { $0.contains("fake-game") })")
         XCTAssertFalse(Machine.isRunning(inside: dir.appendingPathComponent("other")))
 
         p.terminate()

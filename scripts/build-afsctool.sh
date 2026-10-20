@@ -41,7 +41,11 @@ tar -xzf "$WORK/lzfse.tar.gz" -C "$WORK/afsctool/src/private/lzfse" --strip-comp
 SDK="$(xcrun --show-sdk-path)"
 PC="$WORK/pkgconfig"
 mkdir -p "$PC"
-printf 'Name: zlib\nDescription: system zlib\nVersion: 1.2.12\nLibs: -lz\nCflags:\n' >"$PC/zlib.pc"
+# a folder with nothing but zlib's two headers, so it cannot shadow anything else
+ZINC="$(cd "$WORK" && pwd)/zlib-include"
+mkdir -p "$ZINC"
+cp "$SDK/usr/include/zlib.h" "$SDK/usr/include/zconf.h" "$ZINC/"
+printf 'includedir=%s\nName: zlib\nDescription: system zlib\nVersion: 1.2.12\nLibs: -lz\nCflags: -I${includedir}\n' "$ZINC" >"$PC/zlib.pc"
 export PKG_CONFIG_LIBDIR="$PC:$(brew --prefix google-sparsehash)/lib/pkgconfig"
 export SDKROOT="$SDK"
 

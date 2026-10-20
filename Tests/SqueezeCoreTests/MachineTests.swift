@@ -11,32 +11,31 @@ final class MachineTests: XCTestCase {
         XCTAssertGreaterThan(paths.count, list.count / 2)
     }
 
-    /// Starts a copy of `sleep` from a temporary folder and checks that it is seen as running inside that folder.
+    /// Builds a tiny program in a temporary folder, starts it and checks that it is seen as running inside that folder.
     func testProcessStartedFromFolderIsSeenAsRunning() throws {
         let dir = try makeTempDir(self)
+        let src = dir.appendingPathComponent("game.c")
         let exe = dir.appendingPathComponent("fake-game")
-        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: exe)
+        try write("#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n", to: src)
 
-        // a copied system binary loses its platform signature; sign it again so it can start
-        let sign = Process()
-        sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        sign.arguments = ["--force", "--sign", "-", exe.path]
-        sign.standardOutput = FileHandle.nullDevice
-        sign.standardError = FileHandle.nullDevice
-        try sign.run()
-        sign.waitUntilExit()
+        let cc = Process()
+        cc.executableURL = URL(fileURLWithPath: "/usr/bin/cc")
+        cc.arguments = ["-o", exe.path, src.path]
+        do { try cc.run() } catch { throw XCTSkip("no C compiler: \(error)") }
+        cc.waitUntilExit()
+        try XCTSkipIf(cc.terminationStatus != 0, "cc failed")
 
         let p = Process()
         p.executableURL = exe
-        p.arguments = ["30"]
-        do { try p.run() } catch { throw XCTSkip("could not start a test process: \(error)") }
-        addTeardownBlock { p.terminate() }
+        try p.run()
+        addTeardownBlock { if p.isRunning { p.terminate() } }
 
         var seen = false
         for _ in 0..<30 where !seen {
             seen = Machine.isRunning(inside: dir)
             if !seen { Thread.sleep(forTimeInterval: 0.1) }
         }
+        XCTAssertTrue(p.isRunning, "test process exited early, status \(p.terminationStatus)")
         XCTAssertTrue(seen, "ps -axo comm= should list \(exe.path); matching lines: \(Machine.runningExecutables().filter { $0.contains("fake-game") })")
         XCTAssertFalse(Machine.isRunning(inside: dir.appendingPathComponent("other")))
 

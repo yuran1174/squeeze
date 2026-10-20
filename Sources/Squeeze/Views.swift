@@ -29,7 +29,7 @@ struct ProgramsView: View {
             }
             Table(rows, selection: $selection, sortOrder: $sortOrder) {
                 TableColumn("Name", value: \.name) { item in
-                    NameCell(item: item)
+                    NameCell(model: model, item: item)
                 }
                 .width(min: 220, ideal: 320)
                 TableColumn("On disk", value: \.sizeOnDisk) { item in
@@ -44,7 +44,7 @@ struct ProgramsView: View {
                 }
                 .width(min: 120, ideal: 170)
                 TableColumn("") { item in
-                    ActionCell(item: item)
+                    ActionCell(model: model, item: item)
                 }
                 .width(min: 150, ideal: 170)
             }
@@ -106,8 +106,10 @@ struct ProgramsView: View {
     }
 }
 
+/// Table cells are hosted outside the window's view tree on macOS and do not get environment objects,
+/// so the model is passed in.
 struct NameCell: View {
-    @EnvironmentObject var model: AppModel
+    @ObservedObject var model: AppModel
     let item: Item
 
     var body: some View {
@@ -143,7 +145,7 @@ struct ItemIcon: View {
 }
 
 struct ActionCell: View {
-    @EnvironmentObject var model: AppModel
+    @ObservedObject var model: AppModel
     let item: Item
 
     var body: some View {

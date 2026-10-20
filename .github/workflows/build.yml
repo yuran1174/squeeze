@@ -143,11 +143,41 @@ jobs:
           ROOT="$RUNNER_TEMP/steam2"; mkdir -p "$ROOT/steamapps"
           env -u SQUEEZE_AFSCTOOL SQUEEZE_STEAM_ROOT="$ROOT" SQUEEZE_LOG="$RUNNER_TEMP/s2.log" ./scripts/squeeze-steam.sh --list
 
+      - name: The app starts and keeps running
+        run: ./scripts/smoke-test.sh dist/Squeeze.app build/smoke-macos14
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-macos14
+          path: build/smoke-macos14
+
       - uses: actions/upload-artifact@v4
         with:
           name: Squeeze-app
           path: dist/Squeeze-*.zip
 
+
+  # the same app on a newer macOS, then the release (only for v* tags)
+  smoke-newer-macos:
+    needs: build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Squeeze-app
+          path: dist
+      - name: The app starts and keeps running on macOS 15
+        run: |
+          sw_vers
+          ditto -x -k dist/Squeeze-*.zip dist
+          ./scripts/smoke-test.sh dist/Squeeze.app build/smoke-macos15
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-macos15
+          path: build/smoke-macos15
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:

@@ -36,8 +36,18 @@ tar -xzf "$WORK/afsctool.tar.gz" -C "$WORK/afsctool" --strip-components 1
 mkdir -p "$WORK/afsctool/src/private/lzfse"
 tar -xzf "$WORK/lzfse.tar.gz" -C "$WORK/afsctool/src/private/lzfse" --strip-components 1
 
+# pkg-config must not add the SDK's usr/include to the flags: Homebrew's system zlib.pc does that and it
+# hides libc++'s headers. Give pkg-config only sparsehash and a plain zlib.pc (the system libz).
+SDK="$(xcrun --show-sdk-path)"
+PC="$WORK/pkgconfig"
+mkdir -p "$PC"
+printf 'Name: zlib\nDescription: system zlib\nVersion: 1.2.12\nLibs: -lz\nCflags:\n' >"$PC/zlib.pc"
+export PKG_CONFIG_LIBDIR="$PC:$(brew --prefix google-sparsehash)/lib/pkgconfig"
+export SDKROOT="$SDK"
+
 cmake -S "$WORK/afsctool" -B "$WORK/build" \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_SYSROOT="$SDK" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0

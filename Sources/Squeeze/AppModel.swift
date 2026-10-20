@@ -115,11 +115,15 @@ final class AppModel: ObservableObject {
 
     // MARK: - list
 
-    var totalSaved: Int64 { items.map(\.freed).reduce(0, +) }
+    /// Space Squeeze itself has freed (from the history; Apple compresses some apps on its own, that does not count).
+    var totalSaved: Int64 { max(0, settings.history.map(\.bytes).reduce(0, +)) }
 
-    /// Items that are mostly compressed: what the menu bar shows.
+    /// Squeeze compressed this item (and has not decompressed it since).
+    func compressedBySqueeze(_ item: Item) -> Bool { settings.baselines[item.id] != nil }
+
+    /// What Squeeze keeps compressed: what the menu bar shows.
     var compressedItems: [Item] {
-        items.filter { ($0.stats?.compressedShare ?? 0) >= 0.5 && $0.freed > 0 }.sorted { $0.freed > $1.freed }
+        items.filter { compressedBySqueeze($0) && $0.freed > 0 }.sorted { $0.freed > $1.freed }
     }
 
     var busyItems: [Item] { items.filter { isBusy($0.id) } }
@@ -215,7 +219,8 @@ final class AppModel: ObservableObject {
     }
 
     func canDecompress(_ item: Item) -> Bool {
-        guard toolAvailable, let s = item.stats else { return false }
+        // only what Squeeze compressed: apps Apple ships compressed (Xcode) stay as they are
+        guard toolAvailable, compressedBySqueeze(item), let s = item.stats else { return false }
         return s.compressedFiles > 0 && s.savedBytes > 0
     }
 
@@ -225,14 +230,14 @@ final class AppModel: ObservableObject {
         var parts: [String] = []
         if s.logicalBytes > 0, s.savedBytes > s.logicalBytes / 100 {
             let pct = Int((Double(s.savedBytes) / Double(s.logicalBytes) * 100).rounded())
-            parts.append("compressed −\(pct)%")
+            parts.append("−\(pct)% now")
         }
         if let e = item.estimate {
-            if e >= worthCompressing(s) { parts.append("≈ \(Format.bytes(e)) more") } else if parts.isEmpty { parts.append("little to gain") }
+            if e >= worthCompressing(s) { parts.append("≈ \(Format.bytes(e))\(parts.isEmpty ? "" : " more")") } else if parts.isEmpty { parts.append("little to gain") }
         } else {
             parts.append("estimating…")
         }
-        return parts.joined(separator: ", ")
+        return parts.joined(separator: " · ")
     }
 
     func summary(_ item: Item) -> String {
@@ -499,7 +504,8 @@ final class AppModel: ObservableObject {
         if settings.requireACPower, !Machine.onACPower { return }
         if Machine.idleSeconds < Double(settings.idleMinutes * 60) { return }
         autoRunning = true
-        let targets = items.filter { !$0.needsAdmin && ($0.stats?.compressedShare ?? 0) >= 0.5 }.map { ($0.id, $0.targets) }
+        // only what the user compressed with Squeeze
+        let targets = items.filter { !$0.needsAdmin && compressedBySqueeze($0) }.map { ($0.id, $0.targets) }
         Task { [weak self] in
             for (id, folders) in targets {
                 let stats = await Task.detached(priority: .background) { Scanner.scan(folders).0 }.value

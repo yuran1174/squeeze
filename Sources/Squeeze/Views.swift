@@ -42,7 +42,7 @@ struct ProgramsView: View {
                     Text(model.freeText(item))
                         .foregroundStyle(.secondary)
                 }
-                .width(min: 120, ideal: 170)
+                .width(min: 150, ideal: 210)
                 TableColumn("") { item in
                     ActionCell(model: model, item: item)
                 }
@@ -79,7 +79,7 @@ struct ProgramsView: View {
                 }
                 Spacer()
                 if model.totalSaved > 0 {
-                    Text("Freed so far: \(Format.bytes(model.totalSaved))").fontWeight(.medium)
+                    Text("Freed by Squeeze: \(Format.bytes(model.totalSaved))").fontWeight(.medium)
                 }
             }
             .font(.callout)

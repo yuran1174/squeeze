@@ -1,0 +1,113 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # only the release step on a v* tag needs it
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build-app.sh takes the version from git tags
+
+      - name: Toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+          sw_vers
+
+      - name: Install afsctool
+        run: brew install afsctool
+
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+
+      - name: Unit tests
+        run: swift test
+
+      - name: Steam script on a fake library
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/steam"
+          GAME="$ROOT/steamapps/common/Test Game"
+          mkdir -p "$GAME/data"
+          cat > "$ROOT/steamapps/appmanifest_999.acf" <<'EOF'
+          "AppState"
+          {
+              "appid"        "999"
+              "name"         "Test Game"
+              "StateFlags"   "4"
+              "installdir"   "Test Game"
+          }
+          EOF
+          # 8 MB of zeros compresses to almost nothing
+          for i in 1 2 3 4; do head -c 2097152 /dev/zero > "$GAME/data/file$i.bin"; done
+          export SQUEEZE_STEAM_ROOT="$ROOT" SQUEEZE_LOG="$RUNNER_TEMP/squeeze.log"
+
+          echo "--- list (before)"
+          ./scripts/squeeze-steam.sh --list
+
+          echo "--- compress"
+          ./scripts/squeeze-steam.sh --app 999 --force
+          cat "$SQUEEZE_LOG"
+
+          echo "--- flags after"
+          ls -lO "$GAME/data"
+          compressed=$(find "$GAME" -type f -flags +compressed | wc -l | tr -d ' ')
+          echo "compressed files: $compressed"
+          [ "$compressed" = 4 ] || { echo "expected 4 compressed files"; exit 1; }
+
+          echo "--- list (after)"
+          ./scripts/squeeze-steam.sh --list | tee "$RUNNER_TEMP/list.txt"
+          grep -q "compressed 100%" "$RUNNER_TEMP/list.txt"
+
+          echo "--- contents unchanged"
+          for i in 1 2 3 4; do
+            [ "$(stat -f %z "$GAME/data/file$i.bin")" = 2097152 ]
+            cmp "$GAME/data/file$i.bin" <(head -c 2097152 /dev/zero)
+          done
+
+          echo "--- a game that Steam is updating is skipped"
+          echo "new data" > "$GAME/data/new.txt"
+          sed -i '' 's/"StateFlags".*/"StateFlags"   "1026"/' "$ROOT/steamapps/appmanifest_999.acf"
+          ./scripts/squeeze-steam.sh --app 999 --force | tee "$RUNNER_TEMP/busy.txt"
+          grep -q "skipped" "$RUNNER_TEMP/busy.txt"
+          [ -z "$(find "$GAME/data/new.txt" -flags +compressed)" ]
+
+      - name: Build app (Apple Silicon + Intel)
+        env:
+          UNIVERSAL: "1"
+        run: ./scripts/build-app.sh
+
+      - name: Check the app bundle
+        run: |
+          ls -la dist
+          lipo -archs dist/Squeeze.app/Contents/MacOS/Squeeze
+          codesign --verify --deep --strict dist/Squeeze.app
+          plutil -lint dist/Squeeze.app/Contents/Info.plist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Squeeze-app
+          path: dist/Squeeze-*.zip
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/Squeeze-*.zip \
+            --title "Squeeze ${GITHUB_REF_NAME#v}" \
+            --generate-notes

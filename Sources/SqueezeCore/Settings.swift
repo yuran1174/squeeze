@@ -37,7 +37,8 @@ public struct Settings: Codable, Equatable {
         let p = (path as NSString).standardizingPath
         if p == "/" || p == home || p == "/Volumes" || p == "/Users" { return true }
         if p.hasPrefix("/Volumes/"), p.split(separator: "/").count <= 2 { return true }
-        for root in ["/System", "/usr", "/bin", "/sbin", "/private", "/Library", "/Applications", "/opt", "/cores", "/dev"] {
+        // standardizingPath turns /private/var, /private/etc and /private/tmp into /var, /etc and /tmp
+        for root in ["/System", "/usr", "/bin", "/sbin", "/private", "/var", "/etc", "/tmp", "/Library", "/Applications", "/opt", "/cores", "/dev"] {
             if p == root || p.hasPrefix(root + "/") { return true }
         }
         if p == home + "/Library" { return true }

@@ -49,7 +49,7 @@ final class SettingsTests: XCTestCase {
     func testProtectedPaths() {
         let home = "/Users/test"
         for p in ["/", "/System/Library", "/usr/local", "/Applications", "/Applications/Steam.app", "/Library/Foo",
-                  "/private/var", "/opt/homebrew", "/Users", "/Volumes", "/Volumes/Games", home, home + "/Library",
+                  "/private/var", "/var/db", "/etc/hosts", "/tmp/x", "/opt/homebrew", "/Users", "/Volumes", "/Volumes/Games", home, home + "/Library",
                   home + "/Library/Mobile Documents/com~apple~CloudDocs", home + "/Library/CloudStorage/Dropbox"] {
             XCTAssertTrue(Settings.isProtected(p, home: home), "\(p) must be protected")
         }

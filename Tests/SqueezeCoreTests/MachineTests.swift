@@ -11,10 +11,38 @@ final class MachineTests: XCTestCase {
         XCTAssertGreaterThan(paths.count, list.count / 2)
     }
 
-    func testOwnProcessIsListedInsideItsFolder() throws {
-        let exe = try XCTUnwrap(Bundle.main.executableURL).resolvingSymlinksInPath()
-        let folder = exe.deletingLastPathComponent()
-        XCTAssertTrue(Machine.isRunning(inside: folder), "the test runner \(exe.path) should count as running")
+    /// Starts a copy of `sleep` from a temporary folder and checks that it is seen as running inside that folder.
+    func testProcessStartedFromFolderIsSeenAsRunning() throws {
+        let dir = try makeTempDir(self)
+        let exe = dir.appendingPathComponent("fake-game")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: exe)
+
+        // a copied system binary loses its platform signature; sign it again so it can start
+        let sign = Process()
+        sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        sign.arguments = ["--force", "--sign", "-", exe.path]
+        sign.standardOutput = FileHandle.nullDevice
+        sign.standardError = FileHandle.nullDevice
+        try sign.run()
+        sign.waitUntilExit()
+
+        let p = Process()
+        p.executableURL = exe
+        p.arguments = ["30"]
+        do { try p.run() } catch { throw XCTSkip("could not start a test process: \(error)") }
+        addTeardownBlock { p.terminate() }
+
+        var seen = false
+        for _ in 0..<30 where !seen {
+            seen = Machine.isRunning(inside: dir)
+            if !seen { Thread.sleep(forTimeInterval: 0.1) }
+        }
+        XCTAssertTrue(seen, "ps -axo comm= should list \(exe.path)")
+        XCTAssertFalse(Machine.isRunning(inside: dir.appendingPathComponent("other")))
+
+        p.terminate()
+        p.waitUntilExit()
+        XCTAssertFalse(Machine.isRunning(inside: dir))
     }
 
     func testIsRunningInsideMatchesFolderBoundary() {

@@ -1,0 +1,379 @@
+import AppKit
+import Foundation
+import ServiceManagement
+import SqueezeCore
+import UserNotifications
+
+/// Set from the UI, read by the background worker between batches.
+final class StopFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+}
+
+struct Item: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case steam(SteamApp)
+        case folder
+    }
+
+    let id: String
+    let name: String
+    let url: URL
+    let kind: Kind
+    var stats: FolderStats?
+    /// Bytes that compressing the remaining uncompressed files would free (estimate).
+    var estimate: Int64?
+
+    var steamApp: SteamApp? {
+        if case .steam(let app) = kind { return app }
+        return nil
+    }
+}
+
+enum Activity: Equatable {
+    case scanning
+    case compressing(done: Int64, total: Int64)
+    case decompressing
+}
+
+@MainActor
+final class AppModel: ObservableObject {
+    @Published private(set) var items: [Item] = []
+    @Published private(set) var activity: [String: Activity] = [:]
+    /// Per item: why an action did not run, or an error. Key "_" is a general message.
+    @Published var notes: [String: String] = [:]
+    @Published var settings: Settings {
+        didSet { if settings != oldValue { settings.save() } }
+    }
+    @Published private(set) var toolAvailable = Afsctool.locate() != nil
+    @Published private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
+
+    private var stops: [String: StopFlag] = [:]
+    private var scanTask: Task<Void, Never>?
+    private var timer: Timer?
+    private var autoRunning = false
+    private var lastScan = Date.distantPast
+
+    init() {
+        settings = Settings.load()
+        reload()
+        timer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.autoPass() }
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 120 * 1_000_000_000)
+            self?.autoPass()
+        }
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in }
+        }
+    }
+
+    // MARK: - list
+
+    var totalSaved: Int64 { items.compactMap { $0.stats?.savedBytes }.reduce(0, +) }
+
+    /// Steam games plus the user's folders; known numbers stay on screen while everything is rescanned.
+    func reload() {
+        toolAvailable = Afsctool.locate() != nil
+        var list = Steam.installedApps().map { Item(id: $0.id, name: $0.name, url: $0.installDir, kind: .steam($0)) }
+        for path in settings.customFolders {
+            let url = URL(fileURLWithPath: path)
+            list.append(Item(id: "folder:" + path, name: url.lastPathComponent, url: url, kind: .folder))
+        }
+        let old = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        items = list.map { item in
+            var i = item
+            i.stats = old[item.id]?.stats
+            i.estimate = old[item.id]?.estimate
+            return i
+        }
+        scan(items.map(\.id))
+    }
+
+    /// Rescan when the menu opens and the numbers are older than a few minutes.
+    func refreshIfStale() {
+        if Date().timeIntervalSince(lastScan) > 5 * 60 { reload() }
+    }
+
+    private func scan(_ ids: [String]) {
+        scanTask?.cancel()
+        lastScan = Date()
+        let targets = items.filter { ids.contains($0.id) && !isBusy($0.id) }.map { ($0.id, $0.url) }
+        scanTask = Task { [weak self] in
+            for (id, url) in targets {
+                if Task.isCancelled { return }
+                if self?.isBusy(id) == true { continue }
+                self?.activity[id] = .scanning
+                let result = await Task.detached(priority: .utility) { () -> (FolderStats, Int64) in
+                    let (stats, pending) = Scanner.scan(url, collectUncompressed: true)
+                    return (stats, Estimator.estimateSavings(of: pending))
+                }.value
+                guard let model = self else { return }
+                if model.activity[id] == .scanning { model.activity[id] = nil }
+                model.update(id) {
+                    $0.stats = result.0
+                    $0.estimate = result.1
+                }
+            }
+        }
+    }
+
+    private func update(_ id: String, _ change: (inout Item) -> Void) {
+        if let i = items.firstIndex(where: { $0.id == id }) { change(&items[i]) }
+    }
+
+    /// Compressing or decompressing (scanning does not count).
+    func isBusy(_ id: String) -> Bool {
+        switch activity[id] {
+        case .compressing?, .decompressing?: return true
+        default: return false
+        }
+    }
+
+    func progress(_ id: String) -> (done: Int64, total: Int64)? {
+        if case .compressing(let done, let total)? = activity[id] { return (done, total) }
+        return nil
+    }
+
+    // MARK: - what the row shows
+
+    private func worthCompressing(_ s: FolderStats) -> Int64 { max(20 << 20, s.logicalBytes / 200) }
+
+    func canCompress(_ item: Item) -> Bool {
+        guard toolAvailable, let s = item.stats, let e = item.estimate else { return false }
+        return e >= worthCompressing(s)
+    }
+
+    func canDecompress(_ item: Item) -> Bool {
+        guard toolAvailable, let s = item.stats else { return false }
+        return s.compressedFiles > 0 && s.savedBytes > 0
+    }
+
+    func summary(_ item: Item) -> String {
+        guard let s = item.stats else { return activity[item.id] == .scanning ? "Scanning…" : "Not scanned yet" }
+        var parts: [String] = []
+        if s.logicalBytes > 0, s.savedBytes > s.logicalBytes / 100 {
+            let pct = Int((Double(s.savedBytes) / Double(s.logicalBytes) * 100).rounded())
+            parts.append("\(Format.bytes(s.allocatedBytes)) on disk, was \(Format.bytes(s.logicalBytes)) (−\(pct)%)")
+        } else {
+            parts.append("\(Format.bytes(s.allocatedBytes)) on disk")
+        }
+        if let e = item.estimate, e >= worthCompressing(s) {
+            parts.append("≈ \(Format.bytes(e)) can be freed")
+        }
+        if activity[item.id] == .scanning { parts.append("updating…") }
+        return parts.joined(separator: " · ")
+    }
+
+    func historyText(_ e: HistoryEntry) -> String {
+        let when = e.date.formatted(date: .abbreviated, time: .shortened)
+        switch e.action {
+        case .compress: return "freed \(Format.bytes(e.bytes)) · \(when)"
+        case .auto: return "after update, freed \(Format.bytes(e.bytes)) · \(when)"
+        case .decompress: return "decompressed, used \(Format.bytes(-e.bytes)) · \(when)"
+        }
+    }
+
+    // MARK: - actions
+
+    /// Why the item cannot be touched right now, if so.
+    func blockedReason(_ item: Item) -> String? {
+        if !toolAvailable { return "afsctool is not installed" }
+        if Machine.isRunning(inside: item.url) { return "\(item.name) is running. Close it first." }
+        if let app = item.steamApp, Steam.isBusy(app) { return "Steam is installing or updating it. Try again later." }
+        return nil
+    }
+
+    func compress(_ item: Item, auto: Bool = false) {
+        guard !isBusy(item.id) else { return }
+        if let reason = blockedReason(item) {
+            notes[item.id] = reason
+            return
+        }
+        notes[item.id] = nil
+        let stop = StopFlag()
+        stops[item.id] = stop
+        activity[item.id] = .compressing(done: 0, total: item.stats?.uncompressedBytes ?? 0)
+        let id = item.id, name = item.name, url = item.url, app = item.steamApp
+        let report: @Sendable (Int64, Int64) -> Void = { [weak self] done, total in
+            Task { @MainActor in
+                if self?.isBusy(id) == true { self?.activity[id] = .compressing(done: done, total: total) }
+            }
+        }
+        Task { [weak self] in
+            let outcome = await Task.detached(priority: .utility) { () -> (FolderStats, FolderStats, String?) in
+                let (before, pending) = Scanner.scan(url, collectUncompressed: true)
+                let total = pending.reduce(Int64(0)) { $0 + $1.size }
+                report(0, total)
+                var failure: String?
+                var lastCheck = Date.distantPast
+                var blocked = false
+                do {
+                    try Afsctool.compress(pending, progress: { report($0, total) }, shouldStop: {
+                        if stop.isSet { return true }
+                        // the game was started or Steam began an update: stop between batches
+                        if Date().timeIntervalSince(lastCheck) > 5 {
+                            lastCheck = Date()
+                            blocked = Machine.isRunning(inside: url) || (app.map(Steam.isBusy) ?? false)
+                        }
+                        return blocked
+                    })
+                } catch {
+                    failure = error.localizedDescription
+                }
+                if blocked { failure = "Stopped: the game was started or Steam began an update." }
+                let (after, _) = Scanner.scan(url)
+                return (before, after, failure)
+            }.value
+            self?.finish(id: id, name: name, action: auto ? .auto : .compress, before: outcome.0, after: outcome.1, failure: outcome.2)
+        }
+    }
+
+    func stop(_ item: Item) {
+        stops[item.id]?.set()
+        notes[item.id] = "Stopping after the current batch…"
+    }
+
+    func decompress(_ item: Item) {
+        guard !isBusy(item.id) else { return }
+        if let reason = blockedReason(item) {
+            notes[item.id] = reason
+            return
+        }
+        let need = item.stats?.savedBytes ?? 0
+        if let free = Scanner.availableSpace(at: item.url), need + (2 << 30) > free {
+            notes[item.id] = "Not enough free space: decompressing needs \(Format.bytes(need)), \(Format.bytes(free)) is free."
+            return
+        }
+        notes[item.id] = nil
+        activity[item.id] = .decompressing
+        let id = item.id, name = item.name, url = item.url
+        Task { [weak self] in
+            let outcome = await Task.detached(priority: .utility) { () -> (FolderStats, FolderStats, String?) in
+                let (before, _) = Scanner.scan(url)
+                var failure: String?
+                do { try Afsctool.decompress(url) } catch { failure = error.localizedDescription }
+                let (after, _) = Scanner.scan(url)
+                return (before, after, failure)
+            }.value
+            self?.finish(id: id, name: name, action: .decompress, before: outcome.0, after: outcome.1, failure: outcome.2)
+        }
+    }
+
+    private func finish(id: String, name: String, action: HistoryEntry.Action, before: FolderStats, after: FolderStats, failure: String?) {
+        activity[id] = nil
+        stops[id] = nil
+        let freed = before.allocatedBytes - after.allocatedBytes
+        if let failure { notes[id] = failure } else if notes[id]?.hasPrefix("Stopping") == true { notes[id] = nil }
+        if action == .decompress {
+            settings.baselines[id] = nil
+        } else {
+            settings.baselines[id] = after.uncompressedBytes
+        }
+        if freed != 0 { settings.record(HistoryEntry(name: name, action: action, bytes: freed)) }
+        if action == .auto, freed > 0 { notify("\(name): freed \(Format.bytes(freed)) after an update") }
+        update(id) {
+            $0.stats = after
+            $0.estimate = nil
+        }
+        scan([id])
+        if action == .auto {
+            autoRunning = false
+            autoPass()
+        }
+    }
+
+    // MARK: - background
+
+    /// Keeps compressed things compressed: when an update has added enough uncompressed data
+    /// to a mostly compressed game or folder, compress the new files. One item at a time.
+    func autoPass() {
+        guard settings.autoRecompress, toolAvailable, !autoRunning, !activity.keys.contains(where: isBusy) else { return }
+        if settings.requireACPower, !Machine.onACPower { return }
+        if Machine.idleSeconds < Double(settings.idleMinutes * 60) { return }
+        autoRunning = true
+        let targets = items.map { ($0.id, $0.url) }
+        Task { [weak self] in
+            for (id, url) in targets {
+                let stats = await Task.detached(priority: .background) { Scanner.scan(url).0 }.value
+                guard let model = self else { return }
+                model.update(id) { $0.stats = stats }
+                guard let item = model.items.first(where: { $0.id == id }), model.needsRecompression(item, stats) else { continue }
+                guard model.blockedReason(item) == nil else { continue }
+                model.compress(item, auto: true) // finish() continues with the next item
+                return
+            }
+            self?.autoRunning = false
+        }
+    }
+
+    func needsRecompression(_ item: Item, _ s: FolderStats) -> Bool {
+        let base = settings.baselines[item.id] ?? 0
+        return s.compressedShare >= 0.5 && s.uncompressedBytes - base >= Int64(settings.minNewMB) << 20
+    }
+
+    private func notify(_ text: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Squeeze"
+        content.body = text
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
+    // MARK: - folders and settings
+
+    func addFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        panel.message = "Choose folders to compress: games, SDKs, archives of projects…"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK else { return }
+        var refused: [String] = []
+        for url in panel.urls {
+            let path = url.standardizedFileURL.path
+            if Settings.isProtected(path) {
+                refused.append(url.lastPathComponent)
+            } else if !settings.customFolders.contains(path) {
+                settings.customFolders.append(path)
+            }
+        }
+        notes["_"] = refused.isEmpty ? nil : "Not added (system or cloud folder): " + refused.joined(separator: ", ")
+        reload()
+    }
+
+    func remove(_ item: Item) {
+        guard case .folder = item.kind, !isBusy(item.id) else { return }
+        settings.customFolders.removeAll { $0 == item.url.path }
+        settings.baselines[item.id] = nil
+        reload()
+    }
+
+    func reveal(_ item: Item) {
+        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+    }
+
+    func setLaunchAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            notes["_"] = "Open at login: \(error.localizedDescription)"
+        }
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+}

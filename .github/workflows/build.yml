@@ -24,8 +24,12 @@ jobs:
           xcodebuild -version
           sw_vers
 
-      - name: Install afsctool
-        run: brew install afsctool
+      - name: Build afsctool from source
+        run: |
+          ./scripts/build-afsctool.sh
+          echo "SQUEEZE_AFSCTOOL=$PWD/build/afsctool/afsctool" >> "$GITHUB_ENV"
+          # make sure nothing below silently uses a Homebrew copy instead
+          if command -v afsctool; then echo "a Homebrew afsctool is on PATH"; exit 1; fi
 
       - name: Shell syntax
         run: |
@@ -93,10 +97,32 @@ jobs:
 
       - name: Check the app bundle
         run: |
+          set -euo pipefail
+          APP=dist/Squeeze.app
           ls -la dist
-          lipo -archs dist/Squeeze.app/Contents/MacOS/Squeeze
-          codesign --verify --deep --strict dist/Squeeze.app
-          plutil -lint dist/Squeeze.app/Contents/Info.plist
+          find "$APP" -type f | sort
+          for bin in "$APP/Contents/MacOS/Squeeze" "$APP/Contents/Helpers/afsctool"; do
+            archs=$(lipo -archs "$bin"); echo "$bin: $archs"
+            [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
+          done
+          test -s "$APP/Contents/Resources/ThirdParty/afsctool/SOURCE.txt"
+          ls "$APP/Contents/Resources/ThirdParty/afsctool/licenses" | grep -q .
+          codesign --verify --deep --strict "$APP"
+          plutil -lint "$APP/Contents/Info.plist"
+
+      - name: Bundled afsctool works from the unzipped release
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/release"; mkdir -p "$T"
+          ditto -x -k dist/Squeeze-*.zip "$T"
+          head -c 4194304 /dev/zero > "$T/sample.bin"
+          "$T/Squeeze.app/Contents/Helpers/afsctool" -c -T LZFSE "$T/sample.bin"
+          ls -lO "$T/sample.bin"
+          [ -n "$(find "$T/sample.bin" -flags +compressed)" ]
+          # the Steam script finds the copy inside an installed app on its own
+          mkdir -p "$HOME/Applications" && cp -R "$T/Squeeze.app" "$HOME/Applications/"
+          ROOT="$RUNNER_TEMP/steam2"; mkdir -p "$ROOT/steamapps"
+          env -u SQUEEZE_AFSCTOOL SQUEEZE_STEAM_ROOT="$ROOT" SQUEEZE_LOG="$RUNNER_TEMP/s2.log" ./scripts/squeeze-steam.sh --list
 
       - uses: actions/upload-artifact@v4
         with:

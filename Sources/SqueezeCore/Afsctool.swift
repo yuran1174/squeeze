@@ -6,19 +6,58 @@ public enum SqueezeError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .toolMissing: return "afsctool is not installed. Run in Terminal: brew install afsctool"
+        case .toolMissing: return "afsctool was not found. Download Squeeze again or run in Terminal: brew install afsctool"
         case .failed(let text): return text
         }
     }
 }
 
-/// Runs `afsctool` (Homebrew), the tool that does the actual APFS compression.
-/// It is GPL software, so Squeeze does not bundle it: it calls the copy installed by Homebrew.
+/// Runs `afsctool`, the tool that does the actual APFS compression.
+/// afsctool is GPL software by its own authors. The released Squeeze.app carries a copy built from its
+/// published source in `Contents/Helpers` and runs it as a separate program; otherwise a Homebrew copy is used.
 public enum Afsctool {
     public static let searchPaths = ["/opt/homebrew/bin/afsctool", "/usr/local/bin/afsctool", "/opt/local/bin/afsctool"]
 
-    public static func locate() -> URL? {
-        searchPaths.first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+    /// The copy inside the app bundle, if this is a built Squeeze.app that includes one.
+    public static func bundled(in bundle: Bundle = .main) -> URL? {
+        let url = bundle.bundleURL.appendingPathComponent("Contents/Helpers/afsctool")
+        return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
+    }
+
+    /// `SQUEEZE_AFSCTOOL` (for tests and development), then the bundled copy, then Homebrew and MacPorts.
+    public static func locate(bundle: Bundle = .main, environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        if let p = environment["SQUEEZE_AFSCTOOL"], FileManager.default.isExecutableFile(atPath: p) { return URL(fileURLWithPath: p) }
+        if let b = bundled(in: bundle) { return b }
+        return searchPaths.first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+    }
+
+    /// Homebrew's `brew`, for installing afsctool when the app does not carry its own copy.
+    public static func homebrew() -> URL? {
+        ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    /// Runs `brew install afsctool`. Returns the last lines of output on failure.
+    public static func installWithHomebrew() throws {
+        guard let brew = homebrew() else { throw SqueezeError.failed("Homebrew is not installed.") }
+        let p = Process()
+        p.executableURL = brew
+        p.arguments = ["install", "afsctool"]
+        var env = ProcessInfo.processInfo.environment
+        env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+        env["PATH"] = brew.deletingLastPathComponent().path + ":/usr/bin:/bin:/usr/sbin:/sbin"
+        p.environment = env
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        if p.terminationStatus != 0 || locate() == nil {
+            let tail = String(decoding: data, as: UTF8.self).split(separator: "\n").suffix(3).joined(separator: "\n")
+            throw SqueezeError.failed(tail.isEmpty ? "brew exited with code \(p.terminationStatus)" : tail)
+        }
     }
 
     /// Files are compressed in small batches so progress can be shown and stopping never interrupts a file midway.

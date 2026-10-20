@@ -55,9 +55,15 @@ final class AppModel: ObservableObject {
     /// Per item: why an action did not run, or an error. Key "_" is a general message.
     @Published var notes: [String: String] = [:]
     @Published var settings: Settings {
-        didSet { if settings != oldValue { settings.save() } }
+        didSet {
+            guard settings != oldValue else { return }
+            settings.save()
+            if settings.suggestSteam != oldValue.suggestSteam { reload() }
+        }
     }
     @Published private(set) var toolAvailable = Afsctool.locate() != nil
+    @Published private(set) var installingTool = false
+    let canInstallTool = Afsctool.homebrew() != nil
     @Published private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     private var stops: [String: StopFlag] = [:]
@@ -86,13 +92,20 @@ final class AppModel: ObservableObject {
 
     var totalSaved: Int64 { items.compactMap { $0.stats?.savedBytes }.reduce(0, +) }
 
-    /// Steam games plus the user's folders; known numbers stay on screen while everything is rescanned.
+    /// Folders the user added.
+    var folders: [Item] { items.filter { $0.kind == .folder } }
+    /// Found automatically (Steam games, if that is turned on).
+    var suggestions: [Item] { items.filter { $0.kind != .folder } }
+
+    /// The user's folders plus Steam games; known numbers stay on screen while everything is rescanned.
     func reload() {
         toolAvailable = Afsctool.locate() != nil
-        var list = Steam.installedApps().map { Item(id: $0.id, name: $0.name, url: $0.installDir, kind: .steam($0)) }
-        for path in settings.customFolders {
+        var list: [Item] = settings.customFolders.map { path in
             let url = URL(fileURLWithPath: path)
-            list.append(Item(id: "folder:" + path, name: url.lastPathComponent, url: url, kind: .folder))
+            return Item(id: "folder:" + path, name: url.lastPathComponent, url: url, kind: .folder)
+        }
+        if settings.suggestSteam {
+            list += Steam.installedApps().map { Item(id: $0.id, name: $0.name, url: $0.installDir, kind: .steam($0)) }
         }
         let old = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         items = list.map { item in
@@ -192,8 +205,8 @@ final class AppModel: ObservableObject {
 
     /// Why the item cannot be touched right now, if so.
     func blockedReason(_ item: Item) -> String? {
-        if !toolAvailable { return "afsctool is not installed" }
-        if Machine.isRunning(inside: item.url) { return "\(item.name) is running. Close it first." }
+        if !toolAvailable { return "afsctool was not found" }
+        if Machine.isRunning(inside: item.url) { return "A program from this folder is running. Close it first." }
         if let app = item.steamApp, Steam.isBusy(app) { return "Steam is installing or updating it. Try again later." }
         return nil
     }
@@ -226,7 +239,7 @@ final class AppModel: ObservableObject {
                 do {
                     try Afsctool.compress(pending, progress: { report($0, total) }, shouldStop: {
                         if stop.isSet { return true }
-                        // the game was started or Steam began an update: stop between batches
+                        // a program from the folder was started or Steam began an update: stop between batches
                         if Date().timeIntervalSince(lastCheck) > 5 {
                             lastCheck = Date()
                             blocked = Machine.isRunning(inside: url) || (app.map(Steam.isBusy) ?? false)
@@ -236,7 +249,7 @@ final class AppModel: ObservableObject {
                 } catch {
                     failure = error.localizedDescription
                 }
-                if blocked { failure = "Stopped: the game was started or Steam began an update." }
+                if blocked { failure = "Stopped: a program from this folder was started or Steam began an update." }
                 let (after, _) = Scanner.scan(url)
                 return (before, after, failure)
             }.value
@@ -286,7 +299,7 @@ final class AppModel: ObservableObject {
             settings.baselines[id] = after.uncompressedBytes
         }
         if freed != 0 { settings.record(HistoryEntry(name: name, action: action, bytes: freed)) }
-        if action == .auto, freed > 0 { notify("\(name): freed \(Format.bytes(freed)) after an update") }
+        if action == .auto, freed > 0 { notify("\(name): freed \(Format.bytes(freed)) by compressing new files") }
         update(id) {
             $0.stats = after
             $0.estimate = nil
@@ -300,8 +313,8 @@ final class AppModel: ObservableObject {
 
     // MARK: - background
 
-    /// Keeps compressed things compressed: when an update has added enough uncompressed data
-    /// to a mostly compressed game or folder, compress the new files. One item at a time.
+    /// Keeps compressed things compressed: when enough new uncompressed data has appeared
+    /// in a mostly compressed folder (an app or game update, new files), compress it. One item at a time.
     func autoPass() {
         guard settings.autoRecompress, toolAvailable, !autoRunning, !activity.keys.contains(where: isBusy) else { return }
         if settings.requireACPower, !Machine.onACPower { return }
@@ -343,11 +356,18 @@ final class AppModel: ObservableObject {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = true
         panel.prompt = "Add"
-        panel.message = "Choose folders to compress: games, SDKs, archives of projects…"
+        panel.message = "Choose folders with large files you rarely change: games, old projects, SDKs, app data, archives…"
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK else { return }
+        add(panel.urls)
+    }
+
+    /// Adds folders from the open panel or dropped from Finder. System and cloud folders are refused.
+    func add(_ urls: [URL]) {
         var refused: [String] = []
-        for url in panel.urls {
+        for url in urls {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
             let path = url.standardizedFileURL.path
             if Settings.isProtected(path) {
                 refused.append(url.lastPathComponent)
@@ -364,6 +384,22 @@ final class AppModel: ObservableObject {
         settings.customFolders.removeAll { $0 == item.url.path }
         settings.baselines[item.id] = nil
         reload()
+    }
+
+    /// For a build without its own afsctool: install it with Homebrew from the app.
+    func installTool() {
+        guard !installingTool else { return }
+        installingTool = true
+        notes["_"] = nil
+        Task { [weak self] in
+            let error = await Task.detached(priority: .userInitiated) { () -> String? in
+                do { try Afsctool.installWithHomebrew(); return nil } catch { return error.localizedDescription }
+            }.value
+            guard let model = self else { return }
+            model.installingTool = false
+            if let error { model.notes["_"] = "Could not install afsctool: \(error)" }
+            model.reload()
+        }
     }
 
     func reveal(_ item: Item) {

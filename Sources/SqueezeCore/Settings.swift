@@ -10,8 +10,10 @@ public struct Settings: Codable, Equatable {
     public var idleMinutes = 5
     /// Background work only when at least this much new uncompressed data has appeared (MB).
     public var minNewMB = 100
-    /// Folders added by the user besides Steam games.
+    /// Folders added by the user.
     public var customFolders: [String] = []
+    /// Also list installed Steam games, found automatically.
+    public var suggestSteam = true
     /// Recent actions, newest first.
     public var history: [HistoryEntry] = []
     /// Uncompressed bytes left after the last compression, per item (files that do not compress stay as they are).
@@ -28,6 +30,7 @@ public struct Settings: Codable, Equatable {
         idleMinutes = try c.decodeIfPresent(Int.self, forKey: .idleMinutes) ?? d.idleMinutes
         minNewMB = try c.decodeIfPresent(Int.self, forKey: .minNewMB) ?? d.minNewMB
         customFolders = try c.decodeIfPresent([String].self, forKey: .customFolders) ?? d.customFolders
+        suggestSteam = try c.decodeIfPresent(Bool.self, forKey: .suggestSteam) ?? d.suggestSteam
         history = try c.decodeIfPresent([HistoryEntry].self, forKey: .history) ?? d.history
         baselines = try c.decodeIfPresent([String: Int64].self, forKey: .baselines) ?? d.baselines
     }

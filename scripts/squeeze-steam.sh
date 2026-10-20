@@ -36,9 +36,13 @@ log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG"; }
 notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Squeeze\"" >/dev/null 2>&1 || true; }
 human() { awk -v b="$1" 'BEGIN { split("B KB MB GB TB", u); i = 1; while (b >= 1000 && i < 5) { b /= 1000; i++ } printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
 
-AFSCTOOL="$(command -v afsctool || true)"
-for p in /opt/homebrew/bin/afsctool /usr/local/bin/afsctool; do [ -z "$AFSCTOOL" ] && [ -x "$p" ] && AFSCTOOL="$p"; done
-if [ -z "$AFSCTOOL" ]; then echo "afsctool is not installed. Run: brew install afsctool" >&2; exit 1; fi
+# afsctool: SQUEEZE_AFSCTOOL, the copy inside Squeeze.app, or Homebrew's
+AFSCTOOL="${SQUEEZE_AFSCTOOL:-}"
+for p in /Applications/Squeeze.app/Contents/Helpers/afsctool "$HOME/Applications/Squeeze.app/Contents/Helpers/afsctool" \
+         "$(command -v afsctool || true)" /opt/homebrew/bin/afsctool /usr/local/bin/afsctool; do
+  [ -z "$AFSCTOOL" ] && [ -n "$p" ] && [ -x "$p" ] && AFSCTOOL="$p"
+done
+if [ -z "$AFSCTOOL" ]; then echo "afsctool not found. Install Squeeze.app or run: brew install afsctool" >&2; exit 1; fi
 [ -d "$STEAM/steamapps" ] || { echo "Steam library not found: $STEAM" >&2; exit 1; }
 
 # one run at a time

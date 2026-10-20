@@ -32,8 +32,36 @@ final class AfsctoolTests: XCTestCase {
     }
 
     func testToolMissingMessage() {
-        XCTAssertEqual(SqueezeError.toolMissing.errorDescription, "afsctool is not installed. Run in Terminal: brew install afsctool")
+        XCTAssertTrue(SqueezeError.toolMissing.errorDescription?.contains("brew install afsctool") == true)
         XCTAssertEqual(SqueezeError.failed("boom").errorDescription, "boom")
+    }
+
+    func testLocatePrefersEnvironmentVariable() throws {
+        let dir = try makeTempDir(self)
+        let fake = dir.appendingPathComponent("afsctool")
+        try write("#!/bin/sh\n", to: fake)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+        XCTAssertEqual(Afsctool.locate(environment: ["SQUEEZE_AFSCTOOL": fake.path])?.path, fake.path)
+        // a path that is not executable is ignored
+        let notExe = dir.appendingPathComponent("plain")
+        try write("x", to: notExe)
+        XCTAssertNotEqual(Afsctool.locate(environment: ["SQUEEZE_AFSCTOOL": notExe.path])?.path, notExe.path)
+    }
+
+    func testBundledCopyIsFoundInsideAppBundle() throws {
+        let dir = try makeTempDir(self)
+        let app = dir.appendingPathComponent("Squeeze.app")
+        let helper = app.appendingPathComponent("Contents/Helpers/afsctool")
+        try write("#!/bin/sh\n", to: helper)
+        try write("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict><key>CFBundleIdentifier</key><string>test.squeeze</string></dict></plist>
+        """, to: app.appendingPathComponent("Contents/Info.plist"))
+        let bundle = try XCTUnwrap(Bundle(url: app))
+        XCTAssertNil(Afsctool.bundled(in: bundle), "not executable yet")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
+        XCTAssertEqual(Afsctool.bundled(in: bundle)?.lastPathComponent, "afsctool")
+        XCTAssertEqual(Afsctool.locate(bundle: bundle, environment: [:])?.path, Afsctool.bundled(in: bundle)?.path)
     }
 
     /// Real compression: needs afsctool (brew install afsctool) and an APFS volume.

@@ -9,6 +9,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(s.requireACPower)
         XCTAssertEqual(s.idleMinutes, 5)
         XCTAssertEqual(s.minNewMB, 100)
+        XCTAssertTrue(s.suggestSteam)
     }
 
     func testPartialJSONKeepsGivenValues() throws {
@@ -23,6 +24,7 @@ final class SettingsTests: XCTestCase {
         var s = Settings()
         s.idleMinutes = 12
         s.autoRecompress = false
+        s.suggestSteam = false
         s.customFolders = ["/Users/x/Games"]
         s.baselines = ["steam:570": 12345]
         s.record(HistoryEntry(date: Date(timeIntervalSince1970: 1_700_000_000), name: "Dota 2", action: .compress, bytes: 34 << 30))

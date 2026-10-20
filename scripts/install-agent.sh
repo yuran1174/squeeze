@@ -19,8 +19,9 @@ if [ "${1:-}" = "--remove" ]; then
   exit 0
 fi
 
-command -v afsctool >/dev/null || [ -x /opt/homebrew/bin/afsctool ] || [ -x /usr/local/bin/afsctool ] || {
-  echo "afsctool is not installed. Run: brew install afsctool" >&2
+command -v afsctool >/dev/null || [ -x /opt/homebrew/bin/afsctool ] || [ -x /usr/local/bin/afsctool ] ||
+  [ -x /Applications/Squeeze.app/Contents/Helpers/afsctool ] || [ -x "$HOME/Applications/Squeeze.app/Contents/Helpers/afsctool" ] || {
+  echo "afsctool not found. Install Squeeze.app or run: brew install afsctool" >&2
   exit 1
 }
 

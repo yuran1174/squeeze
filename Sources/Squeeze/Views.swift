@@ -1,6 +1,7 @@
 import AppKit
 import SqueezeCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MenuView: View {
     @EnvironmentObject var model: AppModel
@@ -11,9 +12,11 @@ struct MenuView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("Squeeze").font(.headline)
                 Spacer()
-                Text("Saved \(Format.bytes(model.totalSaved))")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                if model.totalSaved > 0 {
+                    Text("Freed \(Format.bytes(model.totalSaved))")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
             if !model.toolAvailable { ToolMissingView() }
             if let note = model.notes["_"] {
@@ -42,21 +45,76 @@ struct MenuView: View {
 
 struct ItemList: View {
     @EnvironmentObject var model: AppModel
+    @State private var dropTargeted = false
 
     var body: some View {
-        if model.items.isEmpty {
-            Text("No Steam games found. Add any folder with “Add Folder…”.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 8)
-        } else {
-            ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(model.items) { ItemRow(item: $0) }
+        Group {
+            if model.items.isEmpty {
+                EmptyState()
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !model.folders.isEmpty {
+                            ForEach(model.folders) { ItemRow(item: $0) }
+                        } else {
+                            Text("Add folders with large files you rarely change. Squeeze shows how much space compression would free before changing anything.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !model.suggestions.isEmpty {
+                            Text("Found automatically")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 6)
+                            ForEach(model.suggestions) { ItemRow(item: $0) }
+                        }
+                    }
+                }
+                .frame(height: min(CGFloat(model.items.count) * 78 + (model.suggestions.isEmpty ? 0 : 24) + (model.folders.isEmpty ? 40 : 0), 460))
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6]))
+                .opacity(dropTargeted ? 1 : 0)
+        )
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            for p in providers {
+                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    Task { @MainActor in model.add([url]) }
                 }
             }
-            .frame(height: min(CGFloat(model.items.count) * 78, 440))
+            return true
         }
+    }
+}
+
+struct EmptyState: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "rectangle.compress.vertical")
+                .font(.system(size: 30))
+                .foregroundStyle(.secondary)
+            Text("Free disk space without deleting anything")
+                .font(.callout.weight(.medium))
+            Text("Choose a folder. Squeeze estimates how much APFS compression would save; files stay where they are and open as usual.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Choose a Folder…") { model.addFolder() }
+                .controlSize(.large)
+                .keyboardShortcut(.defaultAction)
+            Text("or drop a folder here")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 16)
     }
 }
 
@@ -73,6 +131,10 @@ struct ItemRow: View {
                     .font(.body.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(item.url.path)
+                if item.steamApp != nil {
+                    Text("Steam").font(.caption2).foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 8)
                 actions
             }
@@ -98,6 +160,8 @@ struct ItemRow: View {
             Button("Show in Finder") { model.reveal(item) }
             if item.steamApp == nil {
                 Button("Remove from List") { model.remove(item) }
+            } else {
+                Button("Hide Steam Games") { model.settings.suggestSteam = false }
             }
         }
     }
@@ -126,14 +190,15 @@ struct SettingsPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle("Keep compressed after updates", isOn: $model.settings.autoRecompress)
-            Text("Every 30 minutes Squeeze checks games and folders that are already compressed and compresses files that updates have added.")
+            Toggle("Keep folders compressed", isOn: $model.settings.autoRecompress)
+            Text("Every 30 minutes Squeeze checks folders that are already compressed and compresses new files, for example after an app or game update.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Toggle("Only when plugged in", isOn: $model.settings.requireACPower)
             Stepper("Only after \(model.settings.idleMinutes) min without input", value: $model.settings.idleMinutes, in: 0 ... 120, step: 5)
             Stepper("Only when \(model.settings.minNewMB) MB or more are new", value: $model.settings.minNewMB, in: 10 ... 5000, step: 50)
+            Toggle("Show Steam games automatically", isOn: $model.settings.suggestSteam)
             Toggle("Open at login", isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
             Divider()
             Text("Recent").font(.subheadline.weight(.semibold))
@@ -152,24 +217,33 @@ struct SettingsPanel: View {
     }
 }
 
+/// Shown only for builds without their own afsctool (the released app carries one).
 struct ToolMissingView: View {
     @EnvironmentObject var model: AppModel
     private let command = "brew install afsctool"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("afsctool is needed").font(.subheadline.weight(.semibold))
-            Text("Squeeze uses the free afsctool utility to compress files. Install it with Homebrew, then press Check again.")
+            Text("The compression tool is missing").font(.subheadline.weight(.semibold))
+            Text(model.canInstallTool
+                 ? "This copy of Squeeze does not include afsctool. Install it with Homebrew in one click."
+                 : "This copy of Squeeze does not include afsctool. Download Squeeze from its Releases page, or install afsctool with Homebrew.")
                 .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
-                Text(command).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                Spacer()
-                Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(command, forType: .string)
+                if model.canInstallTool {
+                    Button(model.installingTool ? "Installing…" : "Install") { model.installTool() }
+                        .disabled(model.installingTool)
+                    if model.installingTool { ProgressView().controlSize(.small) }
+                } else {
+                    Text(command).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    Button("Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(command, forType: .string)
+                    }
                 }
-                Button("Check again") { model.reload() }
+                Spacer()
+                Button("Check Again") { model.reload() }
             }
             .controlSize(.small)
         }

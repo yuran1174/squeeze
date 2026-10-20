@@ -3,6 +3,202 @@ import SqueezeCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - main window: the table of programs
+
+struct ProgramsView: View {
+    @EnvironmentObject var model: AppModel
+    @State private var sortOrder = [KeyPathComparator(\Item.sizeOnDisk, order: .reverse)]
+    @State private var search = ""
+    @State private var selection: Item.ID?
+    @State private var dropTargeted = false
+
+    private var rows: [Item] {
+        let q = search.trimmingCharacters(in: .whitespaces)
+        let list = q.isEmpty ? model.items : model.items.filter { $0.name.localizedCaseInsensitiveContains(q) }
+        return list.sorted(using: sortOrder)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if !model.toolAvailable { ToolMissingView().padding([.horizontal, .top], 12) }
+            if model.appManagementNeeded { AppManagementBanner().padding([.horizontal, .top], 12) }
+            if let note = model.notes["_"] {
+                Text(note).font(.callout).foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding([.horizontal, .top], 12)
+            }
+            Table(rows, selection: $selection, sortOrder: $sortOrder) {
+                TableColumn("Name", value: \.name) { item in
+                    NameCell(item: item)
+                }
+                .width(min: 220, ideal: 320)
+                TableColumn("On disk", value: \.sizeOnDisk) { item in
+                    Text(item.stats.map { Format.bytes($0.allocatedBytes) } ?? "…")
+                        .monospacedDigit()
+                        .foregroundStyle(item.stats == nil ? .secondary : .primary)
+                }
+                .width(min: 80, ideal: 90)
+                TableColumn("Can free", value: \.canFree) { item in
+                    Text(model.freeText(item))
+                        .foregroundStyle(.secondary)
+                }
+                .width(min: 120, ideal: 170)
+                TableColumn("") { item in
+                    ActionCell(item: item)
+                }
+                .width(min: 150, ideal: 170)
+            }
+            .contextMenu(forSelectionType: Item.ID.self) { ids in
+                if let id = ids.first, let item = model.items.first(where: { $0.id == id }) {
+                    Button("Show in Finder") { model.reveal(item) }
+                    if item.kind == .folder { Button("Remove from List") { model.remove(item) } }
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6]))
+                    .opacity(dropTargeted ? 1 : 0)
+                    .allowsHitTesting(false)
+            )
+            .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+                for p in providers {
+                    _ = p.loadObject(ofClass: URL.self) { url, _ in
+                        guard let url else { return }
+                        Task { @MainActor in model.add([url]) }
+                    }
+                }
+                return true
+            }
+            Divider()
+            HStack {
+                if model.scanning {
+                    ProgressView().controlSize(.small)
+                    Text("Measuring programs…").foregroundStyle(.secondary)
+                } else {
+                    Text("\(model.items.count) items").foregroundStyle(.secondary)
+                }
+                Spacer()
+                if model.totalSaved > 0 {
+                    Text("Freed so far: \(Format.bytes(model.totalSaved))").fontWeight(.medium)
+                }
+            }
+            .font(.callout)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .searchable(text: $search, prompt: "Search programs")
+        .toolbar {
+            ToolbarItemGroup {
+                Button { model.addFolder() } label: { Label("Add Folder…", systemImage: "folder.badge.plus") }
+                    .help("Add any folder that is not a program")
+                Button { model.reload() } label: { Label("Scan Again", systemImage: "arrow.clockwise") }
+                    .help("Measure everything again")
+            }
+        }
+        .frame(minWidth: 720, minHeight: 420)
+        .onAppear {
+            // a menu bar app gets a Dock icon and the app menu while its window is open
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            model.refreshIfStale()
+        }
+        .onDisappear { NSApp.setActivationPolicy(.accessory) }
+    }
+}
+
+struct NameCell: View {
+    @EnvironmentObject var model: AppModel
+    let item: Item
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ItemIcon(item: item).frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.name).lineLimit(1)
+                let sub = model.subtitle(item)
+                if let note = model.notes[item.id] {
+                    Text(note).font(.caption).foregroundStyle(.orange).lineLimit(2)
+                } else if !sub.isEmpty {
+                    Text(sub).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+            }
+        }
+        .help(item.targets.map { ($0.url.path as NSString).abbreviatingWithTildeInPath }.joined(separator: "\n"))
+    }
+}
+
+struct ItemIcon: View {
+    let item: Item
+
+    var body: some View {
+        switch item.kind {
+        case .app(let app):
+            Image(nsImage: NSWorkspace.shared.icon(forFile: app.bundleURL.path)).resizable()
+        case .steam:
+            Image(systemName: "gamecontroller").font(.system(size: 16)).foregroundStyle(.secondary)
+        case .folder:
+            Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path)).resizable()
+        }
+    }
+}
+
+struct ActionCell: View {
+    @EnvironmentObject var model: AppModel
+    let item: Item
+
+    var body: some View {
+        if let p = model.progress(item.id) {
+            HStack(spacing: 6) {
+                ProgressView(value: Double(p.done), total: Double(max(p.total, 1)))
+                    .frame(width: 70)
+                Button("Stop") { model.stop(item) }.controlSize(.small)
+            }
+        } else if model.activity[item.id] == .decompressing {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Decompressing…").font(.caption).foregroundStyle(.secondary)
+            }
+        } else {
+            HStack(spacing: 6) {
+                if model.canCompress(item) {
+                    Button(item.needsAdmin ? "Compress…" : "Compress") { model.compress(item) }
+                        .buttonStyle(.borderedProminent)
+                }
+                if model.canDecompress(item) {
+                    Button("Decompress") { model.decompress(item) }
+                }
+            }
+            .controlSize(.small)
+        }
+    }
+}
+
+struct AppManagementBanner: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "lock.shield").font(.title2).foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Allow Squeeze to change programs").font(.headline)
+                Text("macOS protects programs from being changed by other apps. Open Privacy & Security → App Management and turn on Squeeze, then press Compress again. Compression does not change what is inside the files.")
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Open Settings") { model.openAppManagementSettings() }
+                    Button("Done") { model.appManagementNeeded = false }
+                }
+                .controlSize(.small)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+    }
+}
+
+// MARK: - menu bar
+
 struct MenuView: View {
     @EnvironmentObject var model: AppModel
     @State private var showSettings = false
@@ -19,168 +215,72 @@ struct MenuView: View {
                 }
             }
             if !model.toolAvailable { ToolMissingView() }
-            if let note = model.notes["_"] {
-                Text(note).font(.caption).foregroundStyle(.orange)
+            if showSettings {
+                SettingsPanel()
+            } else {
+                MenuSummary()
             }
-            if showSettings { SettingsPanel() } else { ItemList() }
+            Button {
+                model.openMainWindow?()
+            } label: {
+                Text("Open Squeeze…").frame(maxWidth: .infinity)
+            }
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
             Divider()
             HStack(spacing: 12) {
-                Button("Add Folder…") { model.addFolder() }
-                Button { model.reload() } label: { Image(systemName: "arrow.clockwise") }
-                    .help("Scan again")
-                Spacer()
                 Button { showSettings.toggle() } label: {
-                    Image(systemName: showSettings ? "list.bullet" : "gearshape")
+                    Label(showSettings ? "Back" : "Settings", systemImage: showSettings ? "chevron.left" : "gearshape")
                 }
-                .help(showSettings ? "Back to the list" : "Settings")
+                Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
             }
             .buttonStyle(.borderless)
         }
         .padding(14)
-        .frame(width: 420)
-        .onAppear { model.refreshIfStale() }
+        .frame(width: 340)
     }
 }
 
-struct ItemList: View {
+/// What is happening now and what is kept compressed.
+struct MenuSummary: View {
     @EnvironmentObject var model: AppModel
-    @State private var dropTargeted = false
 
     var body: some View {
-        Group {
-            if model.items.isEmpty {
-                EmptyState()
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if !model.folders.isEmpty {
-                            ForEach(model.folders) { ItemRow(item: $0) }
-                        } else {
-                            Text("Add folders with large files you rarely change. Squeeze shows how much space compression would free before changing anything.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        if !model.suggestions.isEmpty {
-                            Text("Found automatically")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 6)
-                            ForEach(model.suggestions) { ItemRow(item: $0) }
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(model.busyItems) { item in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(item.name).lineLimit(1)
+                        Spacer()
+                        if model.progress(item.id) != nil {
+                            Button("Stop") { model.stop(item) }.controlSize(.small)
                         }
                     }
-                }
-                .frame(height: min(CGFloat(model.items.count) * 78 + (model.suggestions.isEmpty ? 0 : 24) + (model.folders.isEmpty ? 40 : 0), 460))
-            }
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6]))
-                .opacity(dropTargeted ? 1 : 0)
-        )
-        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
-            for p in providers {
-                _ = p.loadObject(ofClass: URL.self) { url, _ in
-                    guard let url else { return }
-                    Task { @MainActor in model.add([url]) }
+                    if let p = model.progress(item.id) {
+                        ProgressView(value: Double(p.done), total: Double(max(p.total, 1)))
+                    } else {
+                        ProgressView().progressViewStyle(.linear)
+                    }
                 }
             }
-            return true
-        }
-    }
-}
-
-struct EmptyState: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "rectangle.compress.vertical")
-                .font(.system(size: 30))
-                .foregroundStyle(.secondary)
-            Text("Free disk space without deleting anything")
-                .font(.callout.weight(.medium))
-            Text("Choose a folder. Squeeze estimates how much APFS compression would save; files stay where they are and open as usual.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Choose a Folder…") { model.addFolder() }
-                .controlSize(.large)
-                .keyboardShortcut(.defaultAction)
-            Text("or drop a folder here")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 16)
-    }
-}
-
-struct ItemRow: View {
-    @EnvironmentObject var model: AppModel
-    let item: Item
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Image(systemName: item.steamApp != nil ? "gamecontroller" : "folder")
+            let kept = model.compressedItems.filter { !model.isBusy($0.id) }
+            if kept.isEmpty && model.busyItems.isEmpty {
+                Text("Nothing is compressed yet. Open Squeeze to see which programs take the most space.")
+                    .font(.callout)
                     .foregroundStyle(.secondary)
-                Text(item.name)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(item.url.path)
-                if item.steamApp != nil {
-                    Text("Steam").font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                actions
-            }
-            Text(model.summary(item))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if let p = model.progress(item.id) {
-                ProgressView(value: Double(p.done), total: Double(max(p.total, 1)))
-                Text("\(Format.bytes(p.done)) of \(Format.bytes(p.total))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else if model.activity[item.id] == .decompressing {
-                ProgressView().progressViewStyle(.linear)
-            }
-            if let note = model.notes[item.id] {
-                Text(note).font(.caption).foregroundStyle(.orange)
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
-        .contextMenu {
-            Button("Show in Finder") { model.reveal(item) }
-            if item.steamApp == nil {
-                Button("Remove from List") { model.remove(item) }
-            } else {
-                Button("Hide Steam Games") { model.settings.suggestSteam = false }
-            }
-        }
-    }
-
-    @ViewBuilder private var actions: some View {
-        if model.progress(item.id) != nil {
-            Button("Stop") { model.stop(item) }
-        } else if model.activity[item.id] == .decompressing {
-            Text("Decompressing…").font(.caption).foregroundStyle(.secondary)
-        } else {
-            HStack(spacing: 6) {
-                if model.canCompress(item) {
-                    Button("Compress") { model.compress(item) }
-                }
-                if model.canDecompress(item) {
-                    Button("Decompress") { model.decompress(item) }
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !kept.isEmpty {
+                Text("Kept compressed").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                ForEach(kept.prefix(6)) { item in
+                    HStack {
+                        Text(item.name).lineLimit(1)
+                        Spacer()
+                        Text("−\(Format.bytes(item.freed))").foregroundStyle(.secondary).monospacedDigit()
+                    }
+                    .font(.callout)
                 }
             }
-            .controlSize(.small)
         }
     }
 }
@@ -190,22 +290,22 @@ struct SettingsPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle("Keep folders compressed", isOn: $model.settings.autoRecompress)
-            Text("Every 30 minutes Squeeze checks folders that are already compressed and compresses new files, for example after an app or game update.")
+            Toggle("Keep programs compressed", isOn: $model.settings.autoRecompress)
+            Text("Every 30 minutes Squeeze checks what is already compressed and compresses new files, for example after an update. Programs that ask for a password are not touched in the background.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Toggle("Only when plugged in", isOn: $model.settings.requireACPower)
             Stepper("Only after \(model.settings.idleMinutes) min without input", value: $model.settings.idleMinutes, in: 0 ... 120, step: 5)
             Stepper("Only when \(model.settings.minNewMB) MB or more are new", value: $model.settings.minNewMB, in: 10 ... 5000, step: 50)
-            Toggle("Show Steam games automatically", isOn: $model.settings.suggestSteam)
+            Toggle("Show Steam games", isOn: $model.settings.suggestSteam)
             Toggle("Open at login", isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
             Divider()
             Text("Recent").font(.subheadline.weight(.semibold))
             if model.settings.history.isEmpty {
                 Text("Nothing yet").font(.caption).foregroundStyle(.secondary)
             }
-            ForEach(Array(model.settings.history.prefix(8).enumerated()), id: \.offset) { _, entry in
+            ForEach(Array(model.settings.history.prefix(6).enumerated()), id: \.offset) { _, entry in
                 HStack {
                     Text(entry.name).lineLimit(1)
                     Spacer()

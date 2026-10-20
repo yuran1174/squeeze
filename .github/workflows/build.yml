@@ -41,6 +41,25 @@ jobs:
       - name: Unit tests
         run: swift test
 
+      - name: A compressed copy of a real app keeps a valid signature
+        run: |
+          set -euo pipefail
+          SRC=/System/Applications/Calculator.app
+          for c in "/Applications/Google Chrome.app" "/Applications/Firefox.app"; do
+            if [ -d "$c" ]; then SRC="$c"; break; fi
+          done
+          echo "using $SRC"
+          D="$RUNNER_TEMP/appcopy"; mkdir -p "$D"
+          ditto "$SRC" "$D/Test.app"
+          codesign --verify --deep --strict "$D/Test.app"
+          find "$D/Test.app" -type f ! -flags +compressed -print0 | xargs -0 -n 64 "$SQUEEZE_AFSCTOOL" -c -T LZFSE
+          du -sh "$SRC" "$D/Test.app"
+          n=$(find "$D/Test.app" -type f -flags +compressed | wc -l | tr -d ' ')
+          echo "compressed files: $n"
+          [ "$n" -gt 0 ]
+          codesign --verify --deep --strict --verbose=2 "$D/Test.app"
+          echo "signature still valid"
+
       - name: Steam script on a fake library
         run: |
           set -euo pipefail

@@ -20,6 +20,45 @@ final class ScannerTests: XCTestCase {
         XCTAssertFalse(pending.contains { $0.url.lastPathComponent == "empty" })
     }
 
+    func testSkipVolatileLeavesOutCachesAndDatabases() throws {
+        let dir = try makeTempDir(self)
+        try write(Data(count: 100), to: dir.appendingPathComponent("models/weights.bin"))
+        try write(Data(count: 100), to: dir.appendingPathComponent("Cache/data_1"))
+        try write(Data(count: 100), to: dir.appendingPathComponent("GPUCache/x"))
+        try write(Data(count: 100), to: dir.appendingPathComponent("Default/Code Cache/js/y"))
+        try write(Data(count: 100), to: dir.appendingPathComponent("IndexedDB/z"))
+        try write(Data(count: 100), to: dir.appendingPathComponent("state.sqlite"))
+        try write(Data(count: 100), to: dir.appendingPathComponent("state.sqlite-wal"))
+        try write(Data(count: 100), to: dir.appendingPathComponent("app.log"))
+        XCTAssertEqual(Scanner.scan(dir).0.files, 8)
+        let (stats, pending) = Scanner.scan(dir, skipVolatile: true, collectUncompressed: true)
+        XCTAssertEqual(stats.files, 1)
+        XCTAssertEqual(pending.map(\.url.lastPathComponent), ["weights.bin"])
+    }
+
+    func testScanTargetsAddUpAndCountOverlapsOnce() throws {
+        let a = try makeTempDir(self), b = try makeTempDir(self)
+        try write(Data(count: 100), to: a.appendingPathComponent("x"))
+        try write(Data(count: 50), to: a.appendingPathComponent("sub/y"))
+        try write(Data(count: 30), to: b.appendingPathComponent("Cache/c"))
+        try write(Data(count: 20), to: b.appendingPathComponent("keep"))
+        let targets = [ScanTarget(url: a), ScanTarget(url: a.appendingPathComponent("sub")), ScanTarget(url: b, skipVolatile: true), ScanTarget(url: a)]
+        let (stats, pending) = Scanner.scan(targets, collectUncompressed: true)
+        XCTAssertEqual(stats.files, 3)
+        XCTAssertEqual(stats.logicalBytes, 170)
+        XCTAssertEqual(pending.count, 3)
+    }
+
+    func testVolatileNames() {
+        for n in ["Cache", "caches", "GPUCache", "Code Cache", "DawnWebGPUCache", "IndexedDB", "Logs"] {
+            XCTAssertTrue(Scanner.isVolatileFolder(n), n)
+        }
+        for n in ["Resources", "models", "Frameworks", "steamapps"] { XCTAssertFalse(Scanner.isVolatileFolder(n), n) }
+        XCTAssertTrue(Scanner.isVolatileFile("History.db"))
+        XCTAssertTrue(Scanner.isVolatileFile("x.SQLITE"))
+        XCTAssertFalse(Scanner.isVolatileFile("libfoo.dylib"))
+    }
+
     func testScanDoesNotCollectUnlessAsked() throws {
         let dir = try makeTempDir(self)
         try write(Data(count: 100), to: dir.appendingPathComponent("a"))

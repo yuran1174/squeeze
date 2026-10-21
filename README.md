@@ -54,6 +54,20 @@ Squeeze keeps compressed programs compressed: updates write new files uncompress
 (on power, while you are away) it compresses the new files. Programs that need a password are not touched
 in the background. The menu bar shows what is happening and what is kept compressed.
 
+### Clean Up
+
+The **Clean Up** tab removes what programs rebuild on their own: caches, old logs, leftovers of apps you
+have removed, developer tool caches (Xcode, npm, Homebrew and others), and, if you tick it, the Trash.
+
+1. Press **Scan**. It takes a minute or two; nothing is removed.
+2. Look through the sections and untick anything you want to keep. The Trash is unticked by default.
+3. Press **Clean…** and confirm.
+
+Removed caches are deleted, not moved to the Trash; programs recreate them when needed. System-wide caches
+that need an administrator password are not included. The cleanup is done by the engine of
+[Mole](https://github.com/tw93/Mole) (see [credits](#license-and-credits)), which has its own long list of
+protections for documents, settings, active databases and system files.
+
 ### What compresses well
 
 | Compresses well | Barely changes |
@@ -145,3 +159,8 @@ Squeeze is MIT licensed. Compression is done by [afsctool](https://github.com/RJ
 authors, GPL-3 licensed. Squeeze.app includes an unmodified copy built from its published source and runs
 it as a separate program; its licenses and the exact source are listed in
 `Squeeze.app/Contents/Resources/ThirdParty/afsctool`.
+
+The Clean Up tab runs the cleanup engine of [Mole](https://github.com/tw93/Mole) by tw93 and contributors
+(`mo clean`), GPL-3 licensed, as a separate program from `Squeeze.app/Contents/Resources/CleanupEngine`, with
+a two-line change described in [third_party/mole](third_party/mole/README.md). Squeeze is not affiliated with or
+endorsed by the Mole project.

@@ -31,6 +31,11 @@ jobs:
           # make sure nothing below silently uses a Homebrew copy instead
           if command -v afsctool; then echo "a Homebrew afsctool is on PATH"; exit 1; fi
 
+      - name: Fetch the cleanup engine (Mole, pinned)
+        run: |
+          ./scripts/build-mole.sh
+          echo "SQUEEZE_CLEANUP_ENGINE=$PWD/build/mole/engine" >> "$GITHUB_ENV"
+
       - name: Shell syntax
         run: |
           for f in scripts/*.sh; do
@@ -40,6 +45,9 @@ jobs:
 
       - name: Unit tests
         run: swift test
+
+      - name: Cleanup engine end to end (preview, keep list, real cleanup)
+        run: ./scripts/test-cleanup-engine.sh build/mole/engine
 
       - name: A compressed copy of a real app keeps a valid signature
         run: |
@@ -125,6 +133,10 @@ jobs:
             [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
           done
           test -s "$APP/Contents/Resources/ThirdParty/afsctool/SOURCE.txt"
+          test -f "$APP/Contents/Resources/CleanupEngine/bin/clean.sh"
+          grep -q MOLE_EXTRA_WHITELIST_FILE "$APP/Contents/Resources/CleanupEngine/lib/core/base.sh"
+          test -s "$APP/Contents/Resources/ThirdParty/mole/LICENSE"
+          test -s "$APP/Contents/Resources/ThirdParty/mole/SOURCE.txt"
           ls "$APP/Contents/Resources/ThirdParty/afsctool/licenses" | grep -q .
           codesign --verify --deep --strict "$APP"
           plutil -lint "$APP/Contents/Info.plist"
@@ -173,6 +185,12 @@ jobs:
           sw_vers
           ditto -x -k dist/Squeeze-*.zip dist
           ./scripts/smoke-test.sh dist/Squeeze.app build/smoke-macos15
+      - name: The Clean Up tab scans on macOS 15
+        env:
+          SQUEEZE_START_TAB: cleanup
+          SQUEEZE_AUTOSCAN: "1"
+          SMOKE_SECONDS: "150"
+        run: ./scripts/smoke-test.sh dist/Squeeze.app build/smoke-macos15/cleanup
       - uses: actions/upload-artifact@v4
         if: always()
         with:

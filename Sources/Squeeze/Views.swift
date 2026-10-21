@@ -95,12 +95,42 @@ struct ProgramsView: View {
                     .help("Measure everything again")
             }
         }
+        .onAppear { model.refreshIfStale() }
+    }
+}
+
+/// The window: Compress (programs table) and Clean Up (caches, logs, leftovers).
+struct MainView: View {
+    enum Tab: String, CaseIterable {
+        case compress = "Compress"
+        case cleanup = "Clean Up"
+    }
+
+    // SQUEEZE_START_TAB=cleanup opens the Clean Up tab (used by the CI screenshot)
+    @State private var tab = ProcessInfo.processInfo.environment["SQUEEZE_START_TAB"] == "cleanup" ? Tab.cleanup : Tab.compress
+
+    var body: some View {
+        Group {
+            switch tab {
+            case .compress: ProgramsView()
+            case .cleanup: CleanupView(model: CleanupModel.shared)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Picker("View", selection: $tab) {
+                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 220)
+            }
+        }
         .frame(minWidth: 720, minHeight: 420)
         .onAppear {
             // a menu bar app gets a Dock icon and the app menu while its window is open
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
-            model.refreshIfStale()
         }
         .onDisappear { NSApp.setActivationPolicy(.accessory) }
     }

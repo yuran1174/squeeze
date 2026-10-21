@@ -80,7 +80,7 @@ public struct Settings: Codable, Equatable {
 }
 
 public struct HistoryEntry: Codable, Equatable {
-    public enum Action: String, Codable { case compress, decompress, auto }
+    public enum Action: String, Codable { case compress, decompress, auto, cleanup }
     public var date: Date
     public var name: String
     public var action: Action

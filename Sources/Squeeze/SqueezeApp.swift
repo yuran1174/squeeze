@@ -14,7 +14,7 @@ struct SqueezeApp: App {
         .menuBarExtraStyle(.window)
 
         Window("Squeeze", id: "programs") {
-            ProgramsView().environmentObject(AppModel.shared)
+            MainView().environmentObject(AppModel.shared)
         }
         .defaultSize(width: 860, height: 560)
     }

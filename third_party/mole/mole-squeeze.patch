@@ -1,0 +1,38 @@
+diff --git a/bin/clean.sh b/bin/clean.sh
+index 14f925c..7fb275e 100755
+--- a/bin/clean.sh
++++ b/bin/clean.sh
+@@ -46,7 +46,8 @@ MOLE_USER_HOME="$(get_invoking_home)"
+ 
+ load_mole_whitelist "$MOLE_USER_HOME" || exit 1
+ 
+-CLEAN_PREVIEW_FINAL_FILE="$MOLE_USER_HOME/.config/mole/clean-list.txt"
++# Squeeze: write the preview to its own file instead of the user's Mole preview.
++CLEAN_PREVIEW_FINAL_FILE="${MOLE_PREVIEW_FILE:-$MOLE_USER_HOME/.config/mole/clean-list.txt}"
+ CLEAN_PREVIEW_STAGING_FILE=""
+ CLEAN_PREVIEW_LEDGER_FILE=""
+ EXPORT_LIST_FILE="$CLEAN_PREVIEW_FINAL_FILE"
+diff --git a/lib/core/base.sh b/lib/core/base.sh
+index dced701..c65f00a 100644
+--- a/lib/core/base.sh
++++ b/lib/core/base.sh
+@@ -521,6 +521,19 @@ load_mole_whitelist() {
+         WHITELIST_PATTERNS=("${DEFAULT_WHITELIST_PATTERNS[@]}")
+     fi
+ 
++    # Squeeze: paths the user left unticked in Squeeze, protected on top of the
++    # normal whitelist (the user's own Mole whitelist or the defaults).
++    # Absolute paths only, one per line; same rules as the whitelist file.
++    if [[ -n "${MOLE_EXTRA_WHITELIST_FILE:-}" && -f "$MOLE_EXTRA_WHITELIST_FILE" && ! -L "$MOLE_EXTRA_WHITELIST_FILE" ]]; then
++        local extra_line
++        while IFS= read -r extra_line || [[ -n "$extra_line" ]]; do
++            [[ -z "$extra_line" || "$extra_line" =~ ^# ]] && continue
++            [[ "$extra_line" == /* ]] || continue
++            [[ "$extra_line" =~ \.\. || "$extra_line" =~ [[:cntrl:]] ]] && continue
++            WHITELIST_PATTERNS+=("$extra_line")
++        done < "$MOLE_EXTRA_WHITELIST_FILE"
++    fi
++
+     # Expand patterns once, before hot cleanup loops call is_path_whitelisted.
+     if [[ ${#WHITELIST_PATTERNS[@]} -gt 0 ]]; then
+         local -a expanded_patterns=()

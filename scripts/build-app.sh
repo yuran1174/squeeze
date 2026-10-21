@@ -29,6 +29,15 @@ else
   echo "afsctool not included (run scripts/build-afsctool.sh first); the app will look for a Homebrew copy"
 fi
 
+if [ -d build/mole/engine ]; then
+  mkdir -p "$APP/Contents/Resources/ThirdParty/mole"
+  cp -R build/mole/engine "$APP/Contents/Resources/CleanupEngine"
+  cp build/mole/LICENSE build/mole/SOURCE.txt build/mole/README.md build/mole/mole-squeeze.patch "$APP/Contents/Resources/ThirdParty/mole/"
+  echo "cleanup engine included"
+else
+  echo "cleanup engine not included (run scripts/build-mole.sh first); the Clean Up tab will say so"
+fi
+
 codesign --force --sign - "$APP"
 (cd dist && ditto -c -k --keepParent Squeeze.app "Squeeze-$VERSION.zip")
 echo "Built dist/Squeeze.app and dist/Squeeze-$VERSION.zip"

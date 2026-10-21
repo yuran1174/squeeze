@@ -264,6 +264,7 @@ final class AppModel: ObservableObject {
         case .compress: return "freed \(Format.bytes(e.bytes)) · \(when)"
         case .auto: return "new files, freed \(Format.bytes(e.bytes)) · \(when)"
         case .decompress: return "decompressed, used \(Format.bytes(-e.bytes)) · \(when)"
+        case .cleanup: return "cleaned up, freed \(Format.bytes(e.bytes)) · \(when)"
         }
     }
 
